@@ -5,7 +5,7 @@ async function json(path,data,token){
 }
 export async function localReview(input){
  const status=await json('/api/learning/status');
- if(!status.ai?.configured||!status.ai.enabled)throw Error('教师尚未启用 DeepSeek 评阅。草稿已保留。');
+ if(!status.ai?.configured||!status.ai.enabled)throw Error('教师尚未启用 模型评阅。草稿已保留。');
  const k='dxx_plan_review_session_'+input.sessionId;
  let entry=JSON.parse(localStorage.getItem(k)||'null');
  if(!entry){const session={id:'plan.'+crypto.randomUUID(),caseId:'cai',startedAt:new Date().toISOString(),student:null};

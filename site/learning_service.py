@@ -29,6 +29,13 @@ PROVIDERS = {
         'models': ('deepseek-ai/DeepSeek-V4.1-Flash', 'deepseek-ai/DeepSeek-V4-Flash'),
         'environment': 'SILICONFLOW_API_KEY'},
 }
+PRIVATE_LABEL = '课程私有智能体'
+
+
+def provider_label(provider):
+    return PRIVATE_LABEL if provider == 'dify' else PROVIDERS.get(provider, {}).get('label', provider)
+
+
 LIMITS = {'maxTokens': 640, 'timeoutSeconds': 25, 'maxTurnsPerConversation': 12,
           'maxRequestsPerSession': 30, 'messageCharacters': 1500, 'historyPairs': 6}
 ID_RE = re.compile(r'[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}\Z')
@@ -99,6 +106,9 @@ class LearningService:
         self.cases = cases
         self.testing = testing
         self.transport = transport
+        self.private_ai = os.environ.get('LAB_AI_MODE') == 'private-dify'
+        self.dify_url = os.environ.get('LAB_DIFY_BASE_URL', '').strip().rstrip('/')
+        self.ai_slots = threading.BoundedSemaphore(4)
         self.config_path = self.data_dir / 'ai-config.json'
         self.config_lock = threading.RLock()
         self.config = {'provider': 'deepseek', 'model': MODELS[0], 'enabled': False, 'maxTokens': LIMITS['maxTokens']}
@@ -279,7 +289,7 @@ class LearningService:
     def redact(self, value, student=None):
         result = value
         with self.config_lock:
-            secret_values = [self.config.get('apiKey', ''), *(os.environ.get(p['environment'], '') for p in PROVIDERS.values())]
+            secret_values = [os.environ.get('LAB_DIFY_KEY', ''), self.config.get('apiKey', ''), *(os.environ.get(p['environment'], '') for p in PROVIDERS.values())]
         for secret in secret_values:
             if secret:
                 result = result.replace(secret, '[凭据已移除]')
@@ -402,6 +412,12 @@ class LearningService:
         return response, 200
 
     def ai_config(self):
+        if self.private_ai:
+            key, model, max_tokens, enabled, provider = self._credentials()
+            return {**LIMITS, 'provider': provider, 'providerLabel': PRIVATE_LABEL, 'model': model,
+                    'enabled': enabled, 'configured': bool(key and self.dify_url), 'maxTokens': max_tokens,
+                    'allowedModels': [model], 'allowedProviders': [provider], 'providers': [],
+                    'liveVerified': False, 'lastTest': None, 'dataNotice': DATA_NOTICE}
         with self.config_lock:
             provider = self.config['provider']
             selected = PROVIDERS[provider]
@@ -437,6 +453,8 @@ class LearningService:
             os.chmod(self.config_path, 0o600)
 
     def configure(self, data):
+        if self.private_ai:
+            raise ServiceError(409, '私有智能体由教学服务器的环境配置管理。')
         check_object(data, (), ('provider', 'apiKey', 'clearKey', 'model', 'enabled', 'maxTokens'))
         if not data:
             raise ServiceError(422, '请选择需要保存的配置。')
@@ -481,14 +499,52 @@ class LearningService:
             return self.ai_config()
 
     def _credentials(self):
+        if self.private_ai:
+            key = os.environ.get('LAB_DIFY_KEY', '').strip() if self.dify_url else ''
+            return key, 'Dify Chatflow', LIMITS['maxTokens'], True, 'dify'
         with self.config_lock:
             provider = self.config['provider']
             return (os.environ.get(PROVIDERS[provider]['environment'], '').strip() or self.config.get('apiKey', '').strip(),
                     self.config['model'], self.config['maxTokens'], self.config['enabled'], provider)
 
+    def _private_reply(self, messages, key):
+        # Only the server operator supplies the destination. Do not follow redirects
+        # or inherit HTTP proxies when transmitting the private application key.
+        from urllib.parse import urlsplit
+        url = urlsplit(self.dify_url)
+        if (not url.hostname or url.username or url.password or url.query or url.fragment
+                or not (url.scheme == 'https' or url.scheme == 'http' and url.hostname in ('localhost', '127.0.0.1', '::1'))):
+            raise ServiceError(503, '请教师核对私有智能体连接配置。', 'ai_not_configured')
+        if not self.ai_slots.acquire(blocking=False):
+            raise ServiceError(503, '智能体正在处理其他提问，可先继续实验，稍后重试。', 'agent_busy')
+        try:
+            instructions = next((m['content'] for m in messages if m['role'] == 'system'), '')
+            history = [m for m in messages[:-1] if m['role'] != 'system']
+            body = {'query': messages[-1]['content'], 'response_mode': 'blocking', 'auto_generate_name': False,
+                    'inputs': {'course_context': instructions, 'recent_turns': dumps(history)},
+                    'user': 'lab-' + uuid.uuid4().hex}
+            request = urllib.request.Request(self.dify_url + '/chat-messages', data=dumps(body).encode(),
+                        headers={'Content-Type': 'application/json', 'Authorization': 'Bearer ' + key})
+            opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect())
+            with opener.open(request, timeout=LIMITS['timeoutSeconds']) as result:
+                raw = result.read(131073)
+            if len(raw) > 131072:
+                raise ValueError('response size')
+            result = json.loads(raw)
+            return {'choices': [{'message': {'content': result['answer']}, 'finish_reason': 'stop'}]}
+        except OSError:
+            raise ServiceError(503, '智能体暂时无法应答，可以继续实验，稍后重新提交。', 'agent_unavailable')
+        finally:
+            self.ai_slots.release()
+
     def _provider(self, payload, key, student=None, provider='deepseek'):
         try:
-            raw = self.transport(payload, key, LIMITS['timeoutSeconds']) if self.transport else official_transport(payload, key, LIMITS['timeoutSeconds'], provider=provider)
+            if self.private_ai:
+                raw = self._private_reply(payload['messages'], key)
+            elif self.transport:
+                raw = self.transport(payload, key, LIMITS['timeoutSeconds'])
+            else:
+                raw = official_transport(payload, key, LIMITS['timeoutSeconds'], provider=provider)
             choice = raw['choices'][0]
             content = choice['message']['content']
             if not isinstance(content, str) or not content.strip() or len(content) > 10000:
@@ -528,7 +584,7 @@ class LearningService:
         fingerprint = self.fingerprint(data)
         key, model, max_tokens, enabled, provider = self._credentials()
         if 'provider' in data:
-            if not isinstance(data['provider'], str) or data['provider'] not in PROVIDERS:
+            if not isinstance(data['provider'], str) or data['provider'] not in (*PROVIDERS, 'dify'):
                 raise ServiceError(422, '同意发送的模型服务商无效。', 'invalid_provider')
         with self.store.connect() as connection:
             connection.execute('BEGIN IMMEDIATE')
@@ -562,7 +618,7 @@ class LearningService:
                 failure = ServiceError(503, '教师尚未启用AI讨论；当前没有生成AI回复。', 'ai_disabled')
             status = 'failed' if failure else 'pending'
             response = {**failure.body, 'status': status, 'requestId': rid, 'conversationId': cid,
-                'provider': provider, 'providerLabel': PROVIDERS[provider]['label'], 'model': model} if failure else None
+                'provider': provider, 'providerLabel': provider_label(provider), 'model': model} if failure else None
             connection.execute('INSERT INTO learning_turns (id,conversation_id,request_id,message,reply,status,error_code,model,usage_json,received_at,completed_at,provider) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)',
                 (turn_id, cid, rid, message, None, status, failure.body['errorCode'] if failure else None,
                  model, None, received, received if failure else None, provider))
@@ -599,14 +655,14 @@ class LearningService:
         try:
             reply, usage, finish = self._provider(payload, key, session['student'], provider=provider)
             response = {'conversationId': cid, 'requestId': rid, 'status': 'succeeded', 'reply': reply,
-                'usage': usage, 'model': model, 'provider': provider, 'providerLabel': PROVIDERS[provider]['label'],
+                'usage': usage, 'model': model, 'provider': provider, 'providerLabel': provider_label(provider),
                 'receivedAt': received, 'completedAt': now(),
                 'finishReason': finish, 'replyTruncated': finish == 'length', 'limits': LIMITS, 'duplicate': False}
             response['retrievedMaterials'] = retrieved
             status, http, error_code = 'succeeded', 200, None
         except ServiceError as error:
             response = {**error.body, 'conversationId': cid, 'requestId': rid, 'status': 'failed', 'receivedAt': received,
-                'provider': provider, 'providerLabel': PROVIDERS[provider]['label'], 'model': model}
+                'provider': provider, 'providerLabel': provider_label(provider), 'model': model}
             reply = usage = None
             status, http, error_code = 'failed', error.status, error.body['errorCode']
         with self.store.connect() as connection:
@@ -617,6 +673,8 @@ class LearningService:
         return response, http
 
     def ai_test(self, data):
+        if self.private_ai:
+            raise ServiceError(409, '请用动小助提交课程问题，验证私有工作流。')
         check_object(data, ('requestId', 'consentToCharge'))
         rid = ident(data['requestId'], 'requestId')
         if data['consentToCharge'] is not True:
@@ -638,13 +696,13 @@ class LearningService:
             payload.update({'enable_thinking': False} if provider == 'siliconflow' else {'thinking': {'type': 'disabled'}})
             _, usage, _ = self._provider(payload, key, provider=provider)
             response = {'status': 'succeeded', 'at': now(), 'model': model, 'usage': usage,
-                'provider': provider, 'providerLabel': PROVIDERS[provider]['label'],
+                'provider': provider, 'providerLabel': provider_label(provider),
                 'message': '连接测试成功。' if not self.testing else '测试传输成功（测试数据，不是外部实连证据）。',
                 'liveVerified': not self.testing, 'dataKind': 'test' if self.testing else 'classroom'}
             http = 200
         except ServiceError as error:
             response = {**error.body, 'status': 'failed', 'at': now(), 'model': model, 'liveVerified': False,
-                'provider': provider, 'providerLabel': PROVIDERS[provider]['label']}
+                'provider': provider, 'providerLabel': provider_label(provider)}
             http = error.status
         with self.config_lock:
             self.config['lastTest'] = {k: response[k] for k in ('status', 'at', 'model', 'provider', 'errorCode') if k in response}
@@ -677,7 +735,7 @@ class LearningService:
                         comment = None
                     common = {'id': turn['id'], 'requestId': turn['request_id'], 'status': turn['status'],
                         'errorCode': turn['error_code'], 'receivedAt': turn['received_at'], 'completedAt': turn['completed_at'],
-                        'model': turn['model'], 'provider': turn['provider'], 'providerLabel': PROVIDERS.get(turn['provider'], {}).get('label', turn['provider']),
+                        'model': turn['model'], 'provider': turn['provider'], 'providerLabel': provider_label(turn['provider']),
                         'usage': usage, 'finishReason': stored_response.get('finishReason'),
                         'replyTruncated': stored_response.get('replyTruncated', False),
                         'retrievedMaterials': stored_response.get('retrievedMaterials', []),

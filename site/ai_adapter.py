@@ -86,7 +86,7 @@ def answer_question(case, text, *, transport=None):
     notice = '固定教学病例问答；未调用外部模型。'
     api_key = os.environ.get('DEEPSEEK_API_KEY', '').strip()
     model = os.environ.get('DEEPSEEK_MODEL', DEFAULT_MODEL).strip()
-    if api_key and re.fullmatch(r'[A-Za-z0-9._-]{1,80}', model):
+    if os.environ.get('LAB_AI_MODE') != 'private-dify' and api_key and re.fullmatch(r'[A-Za-z0-9._-]{1,80}', model):
         menu = [{'id': q['id'], 'question': q['label']} for q in questions.values()]
         payload = {
             'model': model, 'stream': False, 'temperature': 0,

@@ -1,7 +1,7 @@
 import {createUsageTracker} from '../../assets/usage-v23.js';
 const $=id=>document.getElementById(id),el=(t,v)=>{const n=document.createElement(t);if(v)n.textContent=v;return n;};
 let session,token,queue=[],busy=false,initializing=null,conversation=null,pending=null,lastObjective=null,question='',seenObservations=new Set(),seenAnswers=new Set(),seenEvents=new Set();
-const bar=el('aside');bar.className='lab-learning-bar';const open=el('button','DeepSeek 学习问答'),sync=el('span','登记后自动保存学习记录');bar.append(open,sync);document.body.append(bar);
+const bar=el('aside');bar.className='lab-learning-bar';const open=el('button','动小助学习问答'),sync=el('span','登记后自动保存学习记录');bar.append(open,sync);document.body.append(bar);
 const dialog=el('dialog');dialog.className='lab-ai-dialog';dialog.innerHTML='<header><h2>动小助 · DeepSeek学习问答</h2><button type="button" data-close>关闭</button></header><p id="labAIContext"></p><div id="labAIHistory" class="lab-ai-history" aria-live="polite"></div><label>想进一步了解什么？<textarea id="labAIQuestion" rows="3" maxlength="1500" placeholder="围绕当前实验提问，例如：为什么等速收缩不等于恒定张力？"></textarea></label><label class="lab-ai-consent"><input type="checkbox" id="labAIConsent">同意将本次问题与必要上下文发送至硅基流动，并由教师查看讨论记录。请勿输入真实患者或个人隐私。</label><p id="labAIStatus" role="status"></p><button type="button" id="labAISend" class="primary">发送问题</button>';document.body.append(dialog);dialog.querySelector('[data-close]').onclick=()=>dialog.close();
 const objective=()=>{const n=window.App?.state.module?.id;return 'LAB'+String(n>=1&&n<=13?n:3).padStart(2,'0');};
 const moduleName=()=>{const m=window.App?.state.module;return m?'人体运动学实验'+String(m.id===201?3:m.id).padStart(2,'0')+' · '+m.title:'人体运动学实验目录';};

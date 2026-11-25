@@ -67,7 +67,7 @@ export function createLearningHub(options={}){
  function discussion(){
   body.append(el('h3','','从“知道”走向“解释得清楚”'),objectiveSelect(()=>{state.conversation=null;state.pendingDiscussion=null;render();}));
   const controls=el('div','learning-actions'),mode=el('select','');mode.id='learningMode';for(const [id,label]of [['extend','扩展：换情境看知识'],['deepen','深入：追问机制与证据']]){const o=el('option','',label);o.value=id;mode.append(o);}mode.value=state.discussionMode||'extend';mode.addEventListener('change',()=>{state.discussionMode=mode.value;state.conversation=null;state.pendingDiscussion=null;render();});controls.append(mode);body.append(controls);
-  const ai=state.curriculum.ai||{},provider=ai.provider==='siliconflow'?'硅基流动（DeepSeek）':'DeepSeek官方';const status=el('p','ai-status',ai.configured?(ai.enabled===false?'教师暂时关闭了AI讨论。':provider+'已配置。每次点击发送才请求；回答仍需结合课程来源核对。'):provider+'尚未配置密钥。可以先完成目标自测与课程阅读，配置后再讨论。');body.append(status);
+  const ai=state.curriculum.ai||{},provider=ai.providerLabel||'课程模型服务';const status=el('p','ai-status',ai.configured?(ai.enabled===false?'教师暂时关闭了AI讨论。':provider+'已配置。每次点击发送才请求；回答仍需结合课程来源核对。'):provider+'尚未配置密钥。可以先完成目标自测与课程阅读，配置后再讨论。');body.append(status);
   const suggestions=el('div','learning-suggestions');for(const t of ['用一个生活例子解释这个目标，再问我一个问题。','这个结论需要什么证据？哪些推断目前不能做？','如果换成高足弓或疼痛加重，评估思路怎样调整？'])suggestions.append(btn(t,()=>{input.value=t;input.focus();}));body.append(suggestions);
   const transcript=el('div','learning-transcript');transcript.id='learningTranscript';transcript.setAttribute('aria-live','polite');
   const conversations=state.discussions.filter(c=>c.objectiveId===state.objective&&(!c.mode||c.mode===(state.discussionMode||'extend')));
@@ -77,7 +77,7 @@ export function createLearningHub(options={}){
   const consent=el('label','learning-check'),box=el('input','');box.type='checkbox';box.id='discussionConsent';box.checked=!!state.discussionConsent;box.addEventListener('change',()=>state.discussionConsent=box.checked);consent.append(box,el('span','','同意将本次问题和必要的课程讨论上下文发送至'+provider+'，并由教师查看讨论记录。系统不附带登记姓名和学号；请勿在问题中填写个人或患者信息。'));body.append(consent);
   const send=btn(state.busy?'正在等待回答…':'发送学习问题',async()=>{
    if(state.busy)return;if(!input.value.trim()){notice('先写一个想学明白的问题。',true);input.focus();return;}if(!box.checked){notice('发送前请阅读并勾选讨论说明。',true);return;}
-   state.busy=true;send.disabled=true;send.textContent='正在等待回答…';notice('正在请求DeepSeek，请保留本页。');
+   state.busy=true;send.disabled=true;send.textContent='正在等待回答…';notice('正在请求课程智能体，请保留本页。');
    const payload=state.pendingDiscussion||{session:state.session,requestId:uuid(),objectiveId:state.objective,mode:state.discussionMode||'extend',provider:ai.provider||'deepseek',message:input.value.trim(),consent:true,...(state.conversation?{conversationId:state.conversation}:{})};state.pendingDiscussion=payload;
    try{const result=await request('/api/learning/discussion',payload);state.conversation=result.conversationId;state.pendingDiscussion=null;state.questionDraft='';await restore();notice('回答已保存。AI解释可能有误，请结合课程与来源核对。');render();}
    catch(error){if(error.data?.conversationId)state.conversation=error.data.conversationId;if(!error.uncertain)state.pendingDiscussion=null;try{await restore();}catch{}notice(error.message,true);render();}
